@@ -1,0 +1,22 @@
+# Build outputs
+/nitro-uber-pad
+/nitro-uber-pad.exe
+/output/
+/dist/
+*.exe
+*.app/
+
+# Editor runtime files
+*.nup.tmp
+
+# Go
+*.test
+*.out
+/vendor/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -85,7 +85,24 @@ editor.goto_offset(n) -> true | nil, err
 editor.page_info([page]) -> original_base, edited_length | nil, err
 editor.read_bytes(page, offset, count) -> binary string | nil, err
   page is 1-based; offset is 0-based within that edited page. No cross-page read.
-editor.mark_bits(start, length, "#RRGGBB", label) -> true | nil, err
+editor.apply_template("mp3") -> true, frame_count | nil, err
+  Embedded offline Layer III inspector: follows calculated frame boundaries
+  across pages, includes ID3, skips unsupported headers, checks truncation.
+  Bounded to 400 frames / 8 MiB resynchronisation scanning; not an audio decoder.
+editor.read_range(offset, count) -> binary string | nil, err
+  Concatenated edited bytes across pages; 0-based offset; max 64 MiB per call.
+editor.offset_info(offset) -> page, local_offset, original_offset | nil, err
+  Maps an edited-buffer offset to a 1-based page and its original coordinates.
+editor.mark_text(start, length, "#RRGGBB", label) -> true | nil, err
+  Original-coordinate UTF-8 BYTE ranges, not rune indices. Text colors appear
+  in the split annotation preview without replacing the editable text widget.
+editor.mark_bits(start, length, "#RRGGBB", label [, metadata]) -> true | nil, err
+  metadata = {meaning="interpretation", possible="value meanings / allowed values"}
+  Both metadata strings are limited to 4096 bytes. The split panel shows
+  colors, ranges, live raw values (up to 53 bits), meanings and possible values.
+editor.marks() -> {start, length, color, label, meaning, possible, value}[]
+  All registered marks, including other pages; value is a display string.
+  Cross-page fields are identified explicitly; use read_range for arithmetic.
 editor.clear_marks()
   Marks are tab/session-local, MSB-first, half-open bit ranges in ORIGINAL file
   offset coordinates (matching hex offsets), not concatenated edited offsets.
@@ -125,6 +142,11 @@ fs.write(path, value) -> true | nil, err; overwrites directly, no GUI/tab change
   Paths expand ~. Reads materialize the whole file; writes do not create parents.
   Use nup.mkdir first. Do not overwrite an open modified document inadvertently.
 Tools > Load Kitchen Sink Script loads an embedded, editable integration demo.
+Tools > Load and Run Lua File on Current Document reads source without opening
+another document. Tools > Lua Textbox for Current Document edits/runs source
+against the captured tab. Both work in hex and text modes, queue cancellable
+source snapshots, enforce 16 MiB, and fail if the target tab was closed before
+execution. Only run trusted code; Lua has filesystem/network capabilities.
 
 Cancellation is cooperative in Go host functions: Lua loops, HTTP, sleep and
 processes are cancellable; disk operations finish before returning. Dialog

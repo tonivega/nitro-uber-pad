@@ -143,6 +143,9 @@ type Editor struct {
 	mode      viewMode
 	forceHex  bool
 	marks     []bitMark
+	annotationBox *fyne.Container
+	annotationText *markedText
+	annotationLegend *widget.RichText
 	src       *pageSource
 	lines     []lineSpan
 	spans     []lineSpan
@@ -264,13 +267,22 @@ func newEditor(a *App, doc *document.Document, title string) *Editor {
 		container.NewBorder(nil, nil, widget.NewIcon(theme.WarningIcon()), reloadBtn, bannerMsg))
 	ed.banner.Hide()
 
-	ed.content = container.NewBorder(ed.banner, container.NewVBox(ed.info, pager), nil, nil,
-		container.NewStack(ed.textView, ed.hex.content))
+	ed.annotationText = newMarkedText(ed)
+	ed.annotationLegend = widget.NewRichText()
+	ed.annotationLegend.Wrapping = fyne.TextWrapWord
+	annotationSplit := container.NewVSplit(container.NewScroll(ed.annotationText), container.NewVScroll(ed.annotationLegend))
+	annotationSplit.Offset = 0.35
+	ed.annotationBox = container.NewBorder(widget.NewLabel("Annotations — current page; values are MSB-first"), nil, nil, nil, annotationSplit)
+	ed.annotationBox.Hide()
+	split := container.NewHSplit(container.NewStack(ed.textView, ed.hex.content), ed.annotationBox)
+	split.Offset = 0.65
+	ed.content = container.NewBorder(ed.banner, container.NewVBox(ed.info, pager), nil, nil, split)
 	return ed
 }
 
 func (ed *Editor) markDirty() {
 	ed.dirty = true
+	ed.refreshAnnotations()
 	ed.refreshTitle()
 	ed.app.updateStatus()
 }
@@ -390,7 +402,7 @@ func (ed *Editor) loadPage(k int64) {
 // render shows the current page in the current mode.
 func (ed *Editor) render() error {
 	ed.loading = true
-	defer func() { ed.loading = false }()
+	defer func() { ed.loading = false; ed.refreshAnnotations() }()
 	switch ed.mode {
 	case modeHex:
 		b, err := ed.src.read(0, ed.src.n)
@@ -776,6 +788,7 @@ func (ed *Editor) reload() error {
 		ed.app.Log("file", fmt.Sprintf("Reload failed %q: %v", ed.doc.Path(), err))
 		return err
 	}
+	ed.marks = nil
 	ed.app.Log("file", fmt.Sprintf("Reloaded %q (%d bytes; pending edits discarded)", ed.doc.Path(), ed.doc.Size()))
 	ed.diskChanged.Store(false)
 	ed.banner.Hide()

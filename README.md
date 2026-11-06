@@ -217,6 +217,30 @@ Lua includes its standard binary-safe `string` library and an additional `str`
 module for literal split/replace, trimming, case conversion and Go regex search
 and replacement. **Help → Scripting Help & Snippets** documents the signatures.
 
+**Tools → Load and Run Lua File on Current Document…** and **Lua Textbox for
+Current Document…** run external or pasted trusted code against the captured tab,
+in either text or hex mode. They queue cancellable source snapshots (16 MiB maximum)
+and reject a target closed before execution. They do not replace the document with
+the script source.
+
+`editor.apply_template("mp3")` applies the embedded offline MP3 inspector to the
+current document. The Kitchen Sink registers a menu item and toolbar button for
+this, independently of its optional download demo. It calculates Layer III frame
+lengths and follows boundaries across editor pages, inspecting up to 400 frames
+with at most 8 MiB of resynchronisation scanning. Free-format headers are unsupported;
+this is not an audio decoder.
+
+Annotations open a split panel with matching colors, bit ranges, live raw values,
+interpretations and possible values. `editor.mark_bits` accepts an optional fifth
+argument `{meaning="...", possible="..."}`; `editor.marks()` exposes the registered
+fields and metadata to Lua. Raw numerical display is limited to 53 bits. Fields
+outside the current page are not misrepresented as complete numerical values.
+`editor.read_range(offset, count)` reads concatenated edited bytes across pages;
+`editor.offset_info(offset)` maps an edited offset to page/local/original coordinates.
+`editor.mark_text(start, length, color, label)` colors UTF-8 **byte** ranges in a
+separate text preview, keeping the editable text intact. Reapply annotations after
+content changes; interpreted template labels are calculated when the template runs.
+
 Binary templates can use `editor.page_info(page)`,
 `editor.read_bytes(page, offset, count)`, `editor.set_view("hex")`,
 `editor.mark_bits(start, length, "#RRGGBB", label)` and

@@ -167,6 +167,8 @@ func (a *App) rebuildActions() {
 	add("View", fyne.NewMenuItem("Activity Logs", a.showLogs))
 	add("View", fyne.NewMenuItem("Task Runner", a.showTaskRunner))
 	add("Tools", fyne.NewMenuItem("Run Selection / Document as Lua", a.runDocumentLua))
+	add("Tools", fyne.NewMenuItem("Load and Run Lua File on Current Document…", a.runLuaFile))
+	add("Tools", fyne.NewMenuItem("Lua Textbox for Current Document…", a.showLuaTextbox))
 	add("Tools", fyne.NewMenuItem("Load Kitchen Sink Script", a.loadKitchenSink))
 	// Built-in entry points are present even with an older/custom configuration.
 	runLua := config.Action{ID: "__run_document_lua", Label: "Run Lua", Script: "ui.run_document()"}

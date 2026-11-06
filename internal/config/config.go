@@ -32,8 +32,26 @@ type Action struct {
 	Script   string `json:"script"`
 }
 
+// SearchTemplate stores both the pattern and its interpretation/scope.
+type SearchTemplate struct {
+	Name string `json:"name"`
+	Find string `json:"find"`
+	Replace string `json:"replace"`
+	Regex bool `json:"regex"`
+	Scope string `json:"scope"`
+}
+
+type SearchUse struct {
+	SearchTemplate
+	Operation string `json:"operation"`
+	Count int `json:"count"`
+	At string `json:"at"`
+}
+
 // Config is the persisted application configuration.
 type Config struct {
+	SearchTemplates []SearchTemplate `json:"search_templates,omitempty"`
+	SearchHistory []SearchUse `json:"search_history,omitempty"`
 	PageSize int64             `json:"page_size"`
 	HTTPTimeout int            `json:"http_timeout"`
 	Actions  []Action          `json:"actions"`
@@ -80,6 +98,9 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) normalize() {
+	if len(c.SearchHistory) > 100 {
+		c.SearchHistory = c.SearchHistory[len(c.SearchHistory)-100:]
+	}
 	if c.PageSize < 4096 {
 		c.PageSize = DefaultPageSize
 	}

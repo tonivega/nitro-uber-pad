@@ -129,6 +129,7 @@ func (a *App) rebuildActions() {
 	}
 	var bad []string
 	actions := append(append([]config.Action(nil), a.cfg.Actions...), a.scriptActions...)
+	actions = append(actions, inspectionActions()...)
 	for _, act := range actions {
 		act := act
 		run := func() { a.runAction(act) }
@@ -210,6 +211,7 @@ func (a *App) handleShortcut(s fyne.Shortcut) bool {
 }
 
 func (a *App) runAction(act config.Action) {
+	if a.runInspectionAction(act.ID) { return }
 	if act.ID == "__run_document_lua" { a.runDocumentLua(); return }
 	name := act.ID
 	if name == "" {
@@ -507,6 +509,9 @@ func (a *App) Alert(msg string) { dialog.ShowInformation(config.AppName, msg, a.
 
 // OpenFile opens path in a tab (or selects it if already open).
 func (a *App) OpenFile(path string) error {
+	if strings.HasPrefix(strings.ToLower(path), "https://") || strings.HasPrefix(strings.ToLower(path), "http://") {
+		return a.OpenURL(path)
+	}
 	abs, err := filepath.Abs(config.ExpandHome(path))
 	if err != nil {
 		return err

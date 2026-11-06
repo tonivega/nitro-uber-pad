@@ -141,6 +141,8 @@ type Editor struct {
 	pageLabel *widget.Label
 
 	mode      viewMode
+	forceHex  bool
+	marks     []bitMark
 	src       *pageSource
 	lines     []lineSpan
 	spans     []lineSpan
@@ -172,6 +174,10 @@ func newEditor(a *App, doc *document.Document, title string) *Editor {
 	ed.entry = newShortcutEntry(a)
 	ed.entry.OnChanged = func(string) {
 		if ed.loading {
+			return
+		}
+		if _, ok := checkText(nil, []byte(ed.entry.Text), true); !ok {
+			ed.SetText(ed.entry.Text)
 			return
 		}
 		ed.updateGutter()
@@ -239,19 +245,16 @@ func newEditor(a *App, doc *document.Document, title string) *Editor {
 	last := widget.NewButtonWithIcon("", theme.MediaSkipNextIcon(), func() { ed.gotoPage(ed.doc.PageCount() - 1) })
 	ed.pageLabel = widget.NewLabel("")
 	ed.modeLabel = widget.NewLabel("")
-	goEntry := widget.NewEntry()
-	goEntry.SetPlaceHolder("page")
+	goEntry := newPositionEntry(a, positionHelp)
+	goEntry.SetPlaceHolder("page[:line[:col]] / offset")
 	jump := func() {
-		n, err := strconv.ParseInt(strings.TrimSpace(goEntry.Text), 10, 64)
-		if err == nil {
-			ed.gotoPage(n - 1)
-		}
+		if err := ed.jumpPosition(goEntry.Text); err != nil { dialog.ShowError(err, a.win) }
 	}
 	goEntry.OnSubmitted = func(string) { jump() }
 	goBtn := widget.NewButton("Go", jump)
 	pager := container.NewHBox(first, prev, ed.pageLabel, next, last, ed.modeLabel, layout.NewSpacer(),
-		widget.NewLabel("Go to page:"),
-		container.NewGridWrap(fyne.NewSize(100, goEntry.MinSize().Height), goEntry), goBtn)
+		widget.NewLabel("Cursor:"),
+		container.NewGridWrap(fyne.NewSize(220, goEntry.MinSize().Height), goEntry), goBtn)
 	// banner shown when the file is changed on disk by another program
 	bannerMsg := widget.NewLabelWithStyle("This file has been changed on disk by another program. Saving will ask before overwriting it.",
 		fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
@@ -364,7 +367,7 @@ func (ed *Editor) loadPage(k int64) {
 	if maxLen > longLine {
 		mode = modeWindow
 	}
-	if binary {
+	if binary || ed.forceHex {
 		mode = modeHex
 	}
 	ed.mode = mode
@@ -395,6 +398,7 @@ func (ed *Editor) render() error {
 			return err
 		}
 		ed.hex.cur = 0
+		ed.hex.marks = ed.marks
 		ed.hex.setData(ed.src.base, append([]byte(nil), b...))
 		ed.textView.Hide()
 		ed.info.Hide()
@@ -829,16 +833,12 @@ func (ed *Editor) Text() string {
 
 // SetText replaces the current page text.
 func (ed *Editor) SetText(s string) {
-	if ed.mode == modeText {
-		ed.entry.SetText(s)
-		ed.markDirty()
-		return
-	}
-	ed.dirty = false
 	if err := ed.doc.SetPage(ed.page, s); err != nil {
 		dialog.ShowError(err, ed.app.win)
 		return
 	}
+	ed.dirty = false
+	ed.marks = nil // content coordinates may have changed
 	ed.loadPage(ed.page)
 }
 

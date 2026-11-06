@@ -182,6 +182,59 @@ omit credentials and query strings. Paths, URL paths, script errors and explicit
 can still contain sensitive information—review before sharing. Session journals are bounded
 and are not persisted across restarts.
 
+## Find, replace and inspect
+
+- **Ctrl+F** opens Find; **Ctrl+R** opens Replace. Choose literal text or
+  **Go/RE2 regular expressions**, and current page, whole file, or the text
+  selection captured when the dialog opens. Search is case-sensitive; regex
+  replacements support `$1`, `${name}` and `$$`. Literal replacements do not
+  expand dollar signs. Find next wraps; Replace next and confirmed Replace all
+  create pending edits, not immediate disk writes. Whole-file matches can span
+  pages and include unsaved edits.
+- Save named search/replacement templates in the dialog. **View → Search /
+  Replace Usage** shows and clears the latest 100 persisted usages. Templates
+  and history contain the actual patterns/replacements: avoid storing secrets.
+  Search snapshots and replacement output are limited to 64 MiB and 100,000
+  matches per operation; larger files can still be searched page by page.
+  A selection across hidden portions of a long-line window is intentionally
+  rejected; select within one displayed line instead.
+- **Ctrl+G**, the **Go to cursor** toolbar button, and the per-page Cursor
+  control navigate to `page[:line[:column]]` in text mode (all 1-based, Unicode
+  character columns within the page), or an absolute byte `offset` in hex mode
+  (0-based, decimal or `0x` hexadecimal). Offsets refer to the concatenated
+  edited buffer and load the appropriate page. Hover the control for help;
+  Enter in the modal moves immediately.
+- **View → Toggle text / hex** permits inspecting text bytes as hex. Returning
+  to text requires valid representable UTF-8; binary bytes are never coerced
+  into text. The hex preference follows page navigation; invalid pages always
+  remain hex even when the text preference is selected.
+- **File → Open URL** (also `editor.open(url)` and command-line URLs) downloads
+  HTTP(S) data into an unsaved disk-backed tab, without executing it. Downloads
+  are bounded to 64 MiB and use the configured HTTP timeout. Save As creates a
+  permanent local file; otherwise closing removes the temporary download.
+
+Lua includes its standard binary-safe `string` library and an additional `str`
+module for literal split/replace, trimming, case conversion and Go regex search
+and replacement. **Help → Scripting Help & Snippets** documents the signatures.
+
+Binary templates can use `editor.page_info(page)`,
+`editor.read_bytes(page, offset, count)`, `editor.set_view("hex")`,
+`editor.mark_bits(start, length, "#RRGGBB", label)` and
+`editor.clear_marks()`. Marks are session/tab-local, MSB-first bit ranges in
+original file-offset coordinates (matching hex row offsets). Hex displays
+colored offsets, nibbles, individual bits and range labels; later marks win
+color overlaps. Marks do not modify file bytes. Reapply a template after
+length-changing edits; search replacements and `editor.set_text` clear marks.
+
+The Kitchen Sink includes an **opt-in MP3 visual inspector**. Set
+`kitchen_mp3_url` to
+`https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3`, load the Kitchen
+Sink and run it. It downloads that sample as data, identifies ID3 fields and
+up to 100 MPEG Layer III frame headers, and labels/colors fields down to single
+bits across page boundaries. It is an inspector, not an audio decoder; reserved
+and free-format headers are skipped. Network access is never required to run
+the rest of the demo. Only download material you are authorized to use.
+
 ## Under the hood
 
 A compact codebase with distinct responsibilities:

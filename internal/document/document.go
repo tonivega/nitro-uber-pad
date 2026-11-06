@@ -66,6 +66,7 @@ func (e *edit) writeTo(w io.Writer) error {
 type Document struct {
 	mu       sync.Mutex
 	path     string
+	sourceTemp string // backing store for an unsaved downloaded buffer
 	f        *os.File
 	size     int64
 	pageSize int64
@@ -471,6 +472,10 @@ func (d *Document) Save(target string) ([]Change, error) {
 		}
 	}
 	d.clearEdits()
+	if d.sourceTemp != "" {
+		_ = os.Remove(d.sourceTemp)
+		d.sourceTemp = ""
+	}
 	d.path = target
 	return changes, d.openFile()
 }
@@ -492,6 +497,59 @@ func (d *Document) Close() {
 		d.f = nil
 	}
 	d.clearEdits()
+	if d.sourceTemp != "" {
+		_ = os.Remove(d.sourceTemp)
+		d.sourceTemp = ""
+	}
+}
+
+// OpenBuffer creates an unsaved, disk-backed buffer. Saving requires a local
+// target; the temporary source is removed on save or close.
+func OpenBuffer(data []byte, pageSize int64) (*Document, error) {
+	f, err := os.CreateTemp("", "nup-download-*.tmp")
+	if err != nil { return nil, err }
+	name := f.Name()
+	_, err = f.Write(data)
+	closeErr := f.Close()
+	if err == nil { err = closeErr }
+	if err != nil { os.Remove(name); return nil, err }
+	d, err := Open(name, pageSize)
+	if err != nil { os.Remove(name); return nil, err }
+	d.mu.Lock()
+	d.path, d.sourceTemp = "", name
+	d.mu.Unlock()
+	return d, nil
+}
+
+// SetPages stages every replacement before changing the edit set. Errors leave
+// all existing edits intact. Coordinates remain in the original page grid.
+func (d *Document) SetPages(pages map[int64]string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	staged := make(map[int64]*edit)
+	cleanup := func() { for _, e := range staged { if e != nil && e.file != "" { os.Remove(e.file) } } }
+	for k, text := range pages {
+		if k < 0 || k >= d.pageCount() { cleanup(); return fmt.Errorf("page out of range: %d", k) }
+		start, end := d.pageRange(k)
+		original, err := d.readAt(start, end-start)
+		if err != nil { cleanup(); return err }
+		if string(original) == text { staged[k] = nil; continue }
+		e := &edit{start:start, end:end, n:int64(len(text))}
+		// Disk staging also bounds the memory used by a whole-file operation.
+		f, err := os.CreateTemp("", "nup-edit-*.tmp")
+		if err != nil { cleanup(); return err }
+		e.file = f.Name()
+		staged[k] = e
+		_, err = io.WriteString(f, text)
+		ce := f.Close()
+		if err == nil { err = ce }
+		if err != nil { cleanup(); return err }
+	}
+	for k, e := range staged {
+		if old := d.edits[k]; old != nil { d.dropEdit(k, old) }
+		if e != nil { d.edits[k] = e }
+	}
+	return nil
 }
 
 // ChangedOnDisk reports whether the file was modified (or removed) by another

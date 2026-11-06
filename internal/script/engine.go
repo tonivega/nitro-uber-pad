@@ -53,6 +53,49 @@ type Host interface {
 // APIHelp documents the scripting API.
 const APIHelp = `Nitro UberPad scripting (Lua 5.1)
 
+SEARCH, STRINGS AND BINARY INSPECTION
+Ctrl+F: Find; Ctrl+R: Replace; Ctrl+G: Go to cursor (Enter moves immediately).
+Find/replace supports plain text or Go/RE2 regex, selection/page/whole-file
+scope, cross-page matches, persistent templates and latest 100 usages.
+Case-sensitive. Regex replacement: $1, ${name}, $$; plain replacements literal.
+Snapshots/output: 64 MiB; 100,000 matches. Save applies pending edits to disk.
+Selection is captured when opening the dialog; in long-line windows select
+within one displayed line. Usage history persists patterns/replacements;
+View > Search / Replace Usage can clear it. Do not put secrets in templates.
+
+Lua's standard string library is available: string.byte/char/sub/find/match/
+gmatch/gsub/format/lower/upper/len/rep/reverse (Lua patterns, NOT regex).
+str.contains(s, part), str.trim(s), str.lower(s), str.upper(s)
+str.split(s, separator) -> array (literal separator, preserves empty fields)
+str.replace(s, old, new) -> string (literal, binary-safe)
+str.regex_find(s, pattern) -> {start, finish, text}[] | nil, err
+  Go/RE2, 0-based byte offsets, exclusive finish; max 100,000 matches.
+str.regex_replace(s, pattern, replacement) -> string, count | nil, err
+  Go/RE2 replacement syntax, not Lua patterns. 64 MiB output limit.
+
+editor.open_url(url) -> true | nil, err; HTTP(S), max 64 MiB; unsaved tab.
+  Also File > Open URL, editor.open(url), or a URL command-line argument.
+  Download is data, never evaluated. Save As keeps a local copy; otherwise
+  the temporary backing file is deleted on close. Requests are synchronous.
+editor.view() -> "text" or "hex"
+editor.set_view("hex"|"text") -> true | nil, err
+  Text pages may use hex; non-text pages cannot use text. Long lines use windows.
+editor.goto_offset(n) -> true | nil, err
+  Absolute 0-based byte offset in the EDITED concatenated buffer, loads its page.
+editor.page_info([page]) -> original_base, edited_length | nil, err
+editor.read_bytes(page, offset, count) -> binary string | nil, err
+  page is 1-based; offset is 0-based within that edited page. No cross-page read.
+editor.mark_bits(start, length, "#RRGGBB", label) -> true | nil, err
+editor.clear_marks()
+  Marks are tab/session-local, MSB-first, half-open bit ranges in ORIGINAL file
+  offset coordinates (matching hex offsets), not concatenated edited offsets.
+  Use page_info(page).base*8 + local_bit for any page. Up to 10,000 marks;
+  later colors win overlaps. Hex shows colored nibbles, individual bits, range
+  labels and row offsets. Marks do not change bytes or save into the file.
+  After length-changing edits, clear/reapply the inspection template: original
+  page coordinates do not account for inserted/deleted bytes. SetText and
+  search replacements clear marks automatically. Kitchen Sink has opt-in MP3.
+
 EXECUTION AND FILE VARIABLES
 Tools > Run Selection / Document as Lua; toolbar Run Lua; Mod+Enter.
 Selection wins; otherwise the complete edited document is executed (16 MiB limit).
@@ -407,6 +450,7 @@ func (e *Engine) register() {
 	e.registerWorkspace()
 	e.registerTimers()
 	e.registerExecution()
+	e.registerInspection()
 
 	L.SetGlobal("print", L.NewFunction(func(L *lua.LState) int {
 		var parts []string

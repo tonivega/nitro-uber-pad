@@ -2,9 +2,11 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -29,6 +31,7 @@ type hexView struct {
 	widget.BaseWidget
 	base      int64
 	data      []byte
+	marks     []bitMark
 	cur       int // cursor position in nibbles (2 per byte)
 	focused   bool
 	list      *widget.List
@@ -58,7 +61,7 @@ func newHexView(onChange func(), onCursor func()) *hexView {
 	header := container.NewHBox(
 		widget.NewLabelWithStyle("      OFFSET", fyne.TextAlignTrailing, bold),
 		widget.NewLabelWithStyle(hdr.String(), fyne.TextAlignLeading, bold))
-	help := widget.NewLabel("Non-text page (hex view): type 0-9 / A-F to overwrite the nibble at the cursor in place; " +
+	help := widget.NewLabel("Hex view: type 0-9 / A-F to overwrite the nibble at the cursor in place; " +
 		"click either digit to edit it directly; arrows, Home/End, PgUp/PgDn move. No dialog, no insertion.")
 	help.Wrapping = fyne.TextTruncate
 	h.content = container.NewBorder(container.NewVBox(help, header), nil, nil, nil, h)
@@ -193,6 +196,71 @@ func hexSeg(s string, hl, focused bool) *widget.TextSegment {
 	return &widget.TextSegment{Style: st, Text: s}
 }
 
+// Colored segments retain standard text/selection behavior while supplying an
+// explicit Lua-chosen color, independent of theme color names.
+type coloredHexSegment struct {
+	*widget.TextSegment
+	shade color.Color
+}
+func (s *coloredHexSegment) Visual() fyne.CanvasObject {
+	o := s.TextSegment.Visual()
+	s.Update(o)
+	return o
+}
+func (s *coloredHexSegment) Update(o fyne.CanvasObject) {
+	s.TextSegment.Update(o)
+	if text, ok := o.(*canvas.Text); ok { text.Color = s.shade; text.Refresh() }
+}
+func coloredHex(s string, shade color.Color, bold bool) widget.RichTextSegment {
+	segment := hexSeg(s, bold, false)
+	return &coloredHexSegment{TextSegment:segment, shade:shade}
+}
+func (h *hexView) markAt(start,end int64) *bitMark {
+	// Last registration wins when annotations overlap.
+	for i:=len(h.marks)-1;i>=0;i-- {
+		m:=&h.marks[i]
+		if m.Start<end && m.End>start { return m }
+	}
+	return nil
+}
+func (h *hexView) annotatedSegments(row int, line string) []widget.RichTextSegment {
+	var out []widget.RichTextSegment
+	off:=row*hexRow
+	for col,r:=range line {
+		j,half:=-1,0
+		for b:=0;b<hexRow;b++ {
+			if col==hexCol(b) || col==hexCol(b)+1 { j=b; half=col-hexCol(b); break }
+		}
+		if col>=hexAsciiCol && col<hexAsciiCol+min(hexRow,len(h.data)-off) { j=col-hexAsciiCol; half=0 }
+		highlight:=j>=0 && off+j==h.cur/2 && (col>=hexAsciiCol || half==h.cur%2)
+		var mark *bitMark
+		if j>=0 && off+j<len(h.data) {
+			start:=(h.base+int64(off+j))*8
+			if col<hexAsciiCol { start+=int64(half*4); mark=h.markAt(start,start+4) } else { mark=h.markAt(start,start+8) }
+		}
+		if mark!=nil { out=append(out,coloredHex(string(r),mark.Color,highlight)) } else { out=append(out,hexSeg(string(r),highlight,h.focused)) }
+	}
+	start:=(h.base+int64(off))*8
+	end:=start+int64(min(hexRow,len(h.data)-off))*8
+	for _,m:=range h.marks {
+		if m.Start<end && m.End>start {
+			out=append(out,coloredHex(fmt.Sprintf("  [%d:%d) %s",m.Start,m.End,m.Label),m.Color,false))
+		}
+	}
+	// Show exact individual bits as well: nibble coloring alone cannot express
+	// fields such as the 11-bit MPEG frame sync or a 1-bit protection flag.
+	out=append(out,hexSeg("  bits: ",false,false))
+	for j:=off;j<min(off+hexRow,len(h.data));j++ {
+		for bit:=0;bit<8;bit++ {
+			s:=fmt.Sprint((h.data[j]>>uint(7-bit))&1)
+			p:=(h.base+int64(j))*8+int64(bit)
+			if m:=h.markAt(p,p+1); m!=nil { out=append(out,coloredHex(s,m.Color,false)) } else { out=append(out,hexSeg(s,false,false)) }
+		}
+		out=append(out,hexSeg(" ",false,false))
+	}
+	return out
+}
+
 // rowSegments renders row i, highlighting the cursor nibble and its text char.
 func (h *hexView) rowSegments(i int) (string, []widget.RichTextSegment) {
 	off := i * hexRow
@@ -222,6 +290,7 @@ func (h *hexView) rowSegments(i int) (string, []widget.RichTextSegment) {
 	sb.WriteByte('|')
 	line := sb.String()
 	offStr := fmt.Sprintf("%012X", h.base+int64(off))
+	if len(h.marks)>0 { return offStr,h.annotatedSegments(i,line) }
 	cb := h.cur/2 - off
 	if cb < 0 || cb >= len(b) {
 		return offStr, []widget.RichTextSegment{hexSeg(line, false, false)}
@@ -246,14 +315,14 @@ type hexCell struct {
 	widget.BaseWidget
 	h    *hexView
 	row  int
-	off  *widget.Label
+	off  *widget.RichText
 	text *widget.RichText
 	box  *fyne.Container
 }
 
 func newHexCell(h *hexView) *hexCell {
 	c := &hexCell{h: h, row: -1}
-	c.off = widget.NewLabelWithStyle("000000000000", fyne.TextAlignTrailing, fyne.TextStyle{Monospace: true, Bold: true})
+	c.off = widget.NewRichText(hexSeg("000000000000", true, false))
 	c.text = widget.NewRichText(hexSeg(strings.Repeat(" ", hexAsciiCol+hexRow+1), false, false))
 	c.box = container.NewHBox(c.off, c.text)
 	c.ExtendBaseWidget(c)
@@ -265,7 +334,11 @@ func (c *hexCell) CreateRenderer() fyne.WidgetRenderer { return widget.NewSimple
 func (c *hexCell) setRow(i int) {
 	c.row = i
 	off, segs := c.h.rowSegments(i)
-	c.off.SetText(off)
+	start := (c.h.base+int64(i*hexRow))*8
+	if m:=c.h.markAt(start,start+hexRow*8); m!=nil {
+		c.off.Segments=[]widget.RichTextSegment{coloredHex(off,m.Color,true)}
+	} else { c.off.Segments=[]widget.RichTextSegment{hexSeg(off,true,false)} }
+	c.off.Refresh()
 	c.text.Segments = segs
 	c.text.Refresh()
 }

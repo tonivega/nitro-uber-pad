@@ -146,6 +146,8 @@ type Editor struct {
 	annotationBox *fyne.Container
 	annotationText *markedText
 	annotationLegend *widget.RichText
+	annotationToggle *widget.Button
+	annotationsHidden bool
 	src       *pageSource
 	lines     []lineSpan
 	spans     []lineSpan
@@ -238,6 +240,7 @@ func newEditor(a *App, doc *document.Document, title string) *Editor {
 		}
 	})
 	ed.hex.onShortcut = a.handleShortcut
+	ed.hex.onF3 = a.findNext
 	ed.hex.content.Hide()
 	ed.info = widget.NewLabel("")
 	ed.info.Wrapping = fyne.TextTruncate
@@ -255,7 +258,12 @@ func newEditor(a *App, doc *document.Document, title string) *Editor {
 	}
 	goEntry.OnSubmitted = func(string) { jump() }
 	goBtn := widget.NewButton("Go", jump)
-	pager := container.NewHBox(first, prev, ed.pageLabel, next, last, ed.modeLabel, layout.NewSpacer(),
+	ed.annotationToggle = widget.NewButton("Hide annotations", func() {
+		ed.annotationsHidden = !ed.annotationsHidden
+		ed.refreshAnnotations()
+	})
+	ed.annotationToggle.Hide()
+	pager := container.NewHBox(first, prev, ed.pageLabel, next, last, ed.modeLabel, ed.annotationToggle, layout.NewSpacer(),
 		widget.NewLabel("Cursor:"),
 		container.NewGridWrap(fyne.NewSize(220, goEntry.MinSize().Height), goEntry), goBtn)
 	// banner shown when the file is changed on disk by another program
@@ -270,9 +278,14 @@ func newEditor(a *App, doc *document.Document, title string) *Editor {
 	ed.annotationText = newMarkedText(ed)
 	ed.annotationLegend = widget.NewRichText()
 	ed.annotationLegend.Wrapping = fyne.TextWrapWord
-	annotationSplit := container.NewVSplit(container.NewScroll(ed.annotationText), container.NewVScroll(ed.annotationLegend))
+	annotationSplit := container.NewVSplit(ed.annotationText, container.NewVScroll(ed.annotationLegend))
 	annotationSplit.Offset = 0.35
-	ed.annotationBox = container.NewBorder(widget.NewLabel("Annotations — current page; values are MSB-first"), nil, nil, nil, annotationSplit)
+	collapse := widget.NewButtonWithIcon("", theme.NavigateNextIcon(), func() {
+		ed.annotationsHidden = true
+		ed.refreshAnnotations()
+	})
+	ed.annotationBox = container.NewBorder(container.NewBorder(nil, nil, nil, collapse,
+		widget.NewLabel("Annotations — current page; values are MSB-first")), nil, nil, nil, annotationSplit)
 	ed.annotationBox.Hide()
 	split := container.NewHSplit(container.NewStack(ed.textView, ed.hex.content), ed.annotationBox)
 	split.Offset = 0.65

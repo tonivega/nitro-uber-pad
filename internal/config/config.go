@@ -57,6 +57,13 @@ type Config struct {
 	Actions  []Action          `json:"actions"`
 	Vars     map[string]string `json:"vars"`
 	Recent   []string          `json:"recent"`
+	WindowSizes map[string]WinSize `json:"window_sizes,omitempty"`
+}
+
+// WinSize is a remembered window size.
+type WinSize struct {
+	W float32 `json:"w"`
+	H float32 `json:"h"`
 }
 
 // Path returns the location of the configuration file.

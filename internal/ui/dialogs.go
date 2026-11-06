@@ -27,7 +27,7 @@ func (a *App) showRecent() {
 	items := append([]string(nil), a.cfg.Recent...)
 	page, offset := 0, 0
 	var cur []string
-	var dlg dialog.Dialog
+	var dlg fyne.Window
 	label := widget.NewLabel("")
 	list := widget.NewList(
 		func() int { return len(cur) },
@@ -37,7 +37,9 @@ func (a *App) showRecent() {
 				return
 			}
 			mark := ""
-			if _, err := os.Stat(cur[i]); err != nil {
+			if isURL(cur[i]) {
+				mark = "  (URL)"
+			} else if _, err := os.Stat(cur[i]); err != nil {
 				mark = "  (missing)"
 			}
 			o.(*widget.Label).SetText(fmt.Sprintf("%3d. %s%s", offset+i+1, cur[i], mark))
@@ -68,7 +70,7 @@ func (a *App) showRecent() {
 		}
 		p := cur[i]
 		if dlg != nil {
-			dlg.Hide()
+			dlg.Close()
 		}
 		if err := a.OpenFile(p); err != nil {
 			dialog.ShowError(err, a.win)
@@ -100,9 +102,7 @@ func (a *App) showRecent() {
 	})
 	refresh()
 	top := container.NewHBox(prev, label, next, layout.NewSpacer(), clearBtn)
-	dlg = dialog.NewCustom("Recent files (last 100)", "Close", container.NewBorder(top, nil, nil, nil, list), a.win)
-	dlg.Resize(fyne.NewSize(820, 560))
-	dlg.Show()
+	dlg = a.showWindow("recent", "Recent files and URLs (last 100)", container.NewBorder(top, nil, nil, nil, list), fyne.NewSize(820, 560))
 }
 
 // showHistory shows pending changes and the .nup.log history of the current file.
@@ -141,9 +141,7 @@ func (a *App) showHistory() {
 		}
 	}
 	lbl := widget.NewLabelWithStyle(b.String(), fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
-	d := dialog.NewCustom(title, "Close", container.NewScroll(lbl), a.win)
-	d.Resize(fyne.NewSize(860, 560))
-	d.Show()
+	a.showWindow("history", title, container.NewScroll(lbl), fyne.NewSize(860, 560))
 }
 
 type kvRow struct {
@@ -275,7 +273,8 @@ func (a *App) showSettings() {
 		container.NewTabItem("Scripted UI", a.scriptedUISettings()),
 		container.NewTabItem("General", genTab),
 	)
-	d := dialog.NewCustomConfirm("Settings", "Save", "Cancel", tabs, func(ok bool) {
+	saved := false
+	save := func(ok bool) {
 		if !ok {
 			return
 		}
@@ -317,9 +316,13 @@ func (a *App) showSettings() {
 		a.saveConfig()
 		a.rebuildActions()
 		a.Notify("Settings saved")
-	}, a.win)
-	d.Resize(fyne.NewSize(920, 640))
-	d.Show()
+		saved = true
+	}
+	a.showConfirmWindow("settings", "Settings", "Save", tabs, fyne.NewSize(920, 640), func() bool {
+		saved = false
+		save(true)
+		return saved
+	})
 }
 
 // editAction shows a form to edit one scripted action.
@@ -350,7 +353,8 @@ func (a *App) editAction(act config.Action, done func(config.Action)) {
 	)
 	top := container.NewVBox(form, container.NewHBox(widget.NewLabel("Script (Lua):"), layout.NewSpacer(), helpBtn))
 	content := container.NewBorder(top, nil, nil, nil, src)
-	d := dialog.NewCustomConfirm("Edit action", "OK", "Cancel", content, func(ok bool) {
+	accepted := false
+	submit := func(ok bool) {
 		if !ok {
 			return
 		}
@@ -377,9 +381,13 @@ func (a *App) editAction(act config.Action, done func(config.Action)) {
 			Toolbar:  tb.Checked,
 			Script:   src.Text,
 		})
-	}, a.win)
-	d.Resize(fyne.NewSize(780, 620))
-	d.Show()
+		accepted = true
+	}
+	a.showConfirmWindow("edit_action", "Edit action", "OK", content, fyne.NewSize(780, 620), func() bool {
+		accepted = false
+		submit(true)
+		return accepted
+	})
 }
 
 // showScriptHelp shows the scripting API reference and advanced snippets.
@@ -400,9 +408,7 @@ func (a *App) showScriptHelp() {
 		container.NewTabItem("API reference", mk(script.APIHelp)),
 		container.NewTabItem("Snippets (advanced)", mk(script.Snippets)),
 	)
-	d := dialog.NewCustom("Scripting Help & Snippets", "Close", tabs, a.win)
-	d.Resize(fyne.NewSize(900, 640))
-	d.Show()
+	a.showWindow("script_help", "Scripting Help & Snippets", tabs, fyne.NewSize(900, 640))
 }
 
 // showAbout shows version and contact information.
@@ -417,5 +423,5 @@ func (a *App) showAbout() {
 		widget.NewHyperlink("nfn@nitrobutton.com", mail),
 		widget.NewLabel("Configuration: "+config.Path()),
 	)
-	dialog.ShowCustom("About", "Close", content, a.win)
+	a.showWindow("about", "About", content, fyne.NewSize(480, 300))
 }

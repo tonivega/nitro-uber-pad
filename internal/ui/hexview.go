@@ -15,6 +15,8 @@ import (
 const (
 	hexRow      = 16
 	hexAsciiCol = hexRow*3 + 3 // column of the first text character of a row
+	hexOffCols  = 14           // 12 offset digits + 2 spaces
+	hexDigits   = "0123456789ABCDEF"
 )
 
 // hexCol returns the column of the first hex digit of byte j in a row.
@@ -25,32 +27,43 @@ func hexCol(j int) int {
 	return j * 3
 }
 
-// hexView is a virtualized hex editor with file offsets in the left zone.
-// Typing a hex digit overwrites the nibble under the cursor in place.
+// hexView is a virtualized hex editor drawn by the custom fastText control.
+// Only visible rows are materialized as merged color runs, and annotation
+// lookups use a per-bit index, so thousands of marks stay fast.
 type hexView struct {
 	widget.BaseWidget
-	base      int64
-	data      []byte
-	marks     []bitMark
-	cur       int // cursor position in nibbles (2 per byte)
-	focused   bool
-	list      *widget.List
-	content   fyne.CanvasObject
-	onChange  func()
-	onCursor  func()
+	base       int64
+	data       []byte
+	marks      []bitMark
+	cur        int // cursor position in nibbles (2 per byte)
+	focused    bool
+	view       *fastText
+	clip       *container.Scroll
+	content    fyne.CanvasObject
+	onChange   func()
+	onCursor   func()
+	onF3       func()
 	onShortcut func(fyne.Shortcut) bool
+	bitIdx     []int32
+	idxValid   bool
 }
 
 func newHexView(onChange func(), onCursor func()) *hexView {
 	h := &hexView{onChange: onChange, onCursor: onCursor}
-	h.list = widget.NewList(
-		func() int { return (len(h.data) + hexRow - 1) / hexRow },
-		func() fyne.CanvasObject { return newHexCell(h) },
-		func(i widget.ListItemID, o fyne.CanvasObject) { o.(*hexCell).setRow(i) })
+	h.view = newFastText(func() int { return (len(h.data) + hexRow - 1) / hexRow }, h.rowRuns, true)
+	h.view.onTap = func(row int, x float32) {
+		cw := fastCell()
+		col := 0
+		if cw > 0 {
+			col = int(x/cw) - hexOffCols
+		}
+		h.tapAt(row, max(col, 0))
+	}
+	h.clip = container.NewScroll(h.view)
+	h.clip.Direction = container.ScrollNone
 	h.ExtendBaseWidget(h)
-
-	bold := fyne.TextStyle{Monospace: true, Bold: true}
 	var hdr strings.Builder
+	hdr.WriteString("OFFSET        ")
 	for j := 0; j < hexRow; j++ {
 		fmt.Fprintf(&hdr, "%02X ", j)
 		if j == 7 {
@@ -58,27 +71,33 @@ func newHexView(onChange func(), onCursor func()) *hexView {
 		}
 	}
 	hdr.WriteString(" |text|")
-	header := container.NewHBox(
-		widget.NewLabelWithStyle("      OFFSET", fyne.TextAlignTrailing, bold),
-		widget.NewLabelWithStyle(hdr.String(), fyne.TextAlignLeading, bold))
+	header := widget.NewLabelWithStyle(hdr.String(), fyne.TextAlignLeading, fyne.TextStyle{Monospace: true, Bold: true})
 	help := widget.NewLabel("Hex view: type 0-9 / A-F to overwrite the nibble at the cursor in place; " +
-		"click either digit to edit it directly; arrows, Home/End, PgUp/PgDn move. No dialog, no insertion.")
+		"click either digit to edit it directly; arrows, Home/End, PgUp/PgDn move; F3 finds next.")
 	help.Wrapping = fyne.TextTruncate
 	h.content = container.NewBorder(container.NewVBox(help, header), nil, nil, nil, h)
 	return h
 }
 
-func (h *hexView) CreateRenderer() fyne.WidgetRenderer { return widget.NewSimpleRenderer(h.list) }
+func (h *hexView) CreateRenderer() fyne.WidgetRenderer { return widget.NewSimpleRenderer(h.clip) }
 
 func (h *hexView) setData(base int64, data []byte) {
-	h.base, h.data = base, data
+	h.base, h.data, h.idxValid = base, data, false
 	if m := len(h.data)*2 - 1; h.cur > m {
 		h.cur = m
 	}
 	if h.cur < 0 {
 		h.cur = 0
 	}
-	h.list.Refresh()
+	h.view.Refresh()
+}
+
+func (h *hexView) setMarks(m []bitMark) {
+	if len(m) == 0 && len(h.marks) == 0 {
+		return
+	}
+	h.marks, h.idxValid = m, false
+	h.view.Refresh()
 }
 
 func (h *hexView) setCursor(n int) {
@@ -90,9 +109,9 @@ func (h *hexView) setCursor(n int) {
 	}
 	h.cur = n
 	if len(h.data) > 0 {
-		h.list.ScrollTo(n / 2 / hexRow)
+		h.view.scrollTo(n / 2 / hexRow)
 	}
-	h.list.Refresh()
+	h.view.Refresh()
 	if h.onCursor != nil {
 		h.onCursor()
 	}
@@ -130,8 +149,8 @@ func (h *hexView) TypedShortcut(s fyne.Shortcut) {
 	}
 }
 
-func (h *hexView) FocusGained() { h.focused = true; h.list.Refresh() }
-func (h *hexView) FocusLost()   { h.focused = false; h.list.Refresh() }
+func (h *hexView) FocusGained() { h.focused = true; h.view.Refresh() }
+func (h *hexView) FocusLost()   { h.focused = false; h.view.Refresh() }
 
 func hexDigit(r rune) (byte, bool) {
 	switch {
@@ -166,6 +185,10 @@ func (h *hexView) TypedRune(r rune) {
 func (h *hexView) TypedKey(ev *fyne.KeyEvent) {
 	rowStart := h.cur / (2 * hexRow) * 2 * hexRow
 	switch ev.Name {
+	case fyne.KeyF3:
+		if h.onF3 != nil {
+			h.onF3()
+		}
 	case fyne.KeyLeft:
 		h.setCursor(h.cur - 1)
 	case fyne.KeyRight:
@@ -185,6 +208,143 @@ func (h *hexView) TypedKey(ev *fyne.KeyEvent) {
 	}
 }
 
+// ensureIdx builds a per-bit "winning mark" index for the page once per
+// data/mark change; later registrations win overlaps.
+func (h *hexView) ensureIdx() {
+	if h.idxValid {
+		return
+	}
+	h.idxValid = true
+	if len(h.marks) == 0 {
+		h.bitIdx = h.bitIdx[:0]
+		return
+	}
+	n := len(h.data) * 8
+	if cap(h.bitIdx) < n {
+		h.bitIdx = make([]int32, n)
+	} else {
+		h.bitIdx = h.bitIdx[:n]
+	}
+	for i := range h.bitIdx {
+		h.bitIdx[i] = -1
+	}
+	lo := h.base * 8
+	for k, m := range h.marks {
+		s, e := max(m.Start-lo, 0), min(m.End-lo, int64(n))
+		for b := s; b < e; b++ {
+			h.bitIdx[b] = int32(k)
+		}
+	}
+}
+
+func (h *hexView) markIn(s, e int) *bitMark {
+	best := int32(-1)
+	for b := max(s, 0); b < e && b < len(h.bitIdx); b++ {
+		if h.bitIdx[b] > best {
+			best = h.bitIdx[b]
+		}
+	}
+	if best < 0 || int(best) >= len(h.marks) {
+		return nil
+	}
+	return &h.marks[best]
+}
+
+// rowRuns renders row i: offset, hex digits, text, labels and bits.
+func (h *hexView) rowRuns(i int) []textRun {
+	off := i * hexRow
+	if off >= len(h.data) {
+		return nil
+	}
+	h.ensureIdx()
+	end := min(off+hexRow, len(h.data))
+	var b runBuilder
+	var sel color.Color
+	if h.focused {
+		sel = theme.SelectionColor()
+	}
+	curByte := h.cur / 2
+	b.add(fmt.Sprintf("%012X", h.base+int64(off)), markColor(h.markIn(off*8, end*8)), nil, true)
+	b.add("  ", nil, nil, false)
+	for j := 0; j < hexRow; j++ {
+		p := off + j
+		if p >= end {
+			b.add("   ", nil, nil, false)
+		} else {
+			v := h.data[p]
+			for half := 0; half < 2; half++ {
+				nib := v >> 4
+				if half == 1 {
+					nib = v & 15
+				}
+				fg := markColor(h.markIn(p*8+half*4, p*8+half*4+4))
+				var bg color.Color
+				bold := false
+				if p == curByte && half == h.cur%2 {
+					bold, bg = true, sel
+				}
+				b.add(hexDigits[nib:nib+1], fg, bg, bold)
+			}
+			b.add(" ", nil, nil, false)
+		}
+		if j == 7 {
+			b.add(" ", nil, nil, false)
+		}
+	}
+	b.add(" |", nil, nil, false)
+	for p := off; p < end; p++ {
+		c := h.data[p]
+		s := "."
+		if c >= 0x20 && c < 0x7f {
+			s = string(rune(c))
+		}
+		var bg color.Color
+		bold := p == curByte
+		if bold {
+			bg = sel
+		}
+		b.add(s, markColor(h.markIn(p*8, p*8+8)), bg, bold)
+	}
+	b.add("|", nil, nil, false)
+	if len(h.marks) > 0 {
+		var seen []int32
+		for bit := off * 8; bit < end*8 && bit < len(h.bitIdx); bit++ {
+			k := h.bitIdx[bit]
+			if k < 0 {
+				continue
+			}
+			dup := false
+			for _, s := range seen {
+				if s == k {
+					dup = true
+					break
+				}
+			}
+			if !dup && len(seen) < 6 {
+				seen = append(seen, k)
+			}
+		}
+		for _, k := range seen {
+			m := h.marks[k]
+			b.add(fmt.Sprintf("  [%d:%d) %s", m.Start, m.End, m.Label), m.Color, nil, false)
+		}
+		b.add("  bits: ", nil, nil, false)
+		for p := off; p < end; p++ {
+			for bit := 0; bit < 8; bit++ {
+				fg := markColor(h.markIn(p*8+bit, p*8+bit+1))
+				if (h.data[p]>>uint(7-bit))&1 == 1 {
+					b.add("1", fg, nil, false)
+				} else {
+					b.add("0", fg, nil, false)
+				}
+			}
+			b.add(" ", nil, nil, false)
+		}
+	}
+	b.flush()
+	return b.runs
+}
+
 func hexSeg(s string, hl, focused bool) *widget.TextSegment {
 	st := widget.RichTextStyle{Inline: true, TextStyle: fyne.TextStyle{Monospace: true}}
 	if hl {
@@ -196,166 +356,27 @@ func hexSeg(s string, hl, focused bool) *widget.TextSegment {
 	return &widget.TextSegment{Style: st, Text: s}
 }
 
-// Colored segments retain standard text/selection behavior while supplying an
-// explicit Lua-chosen color, independent of theme color names.
+// Colored segments (used by the annotation legend) keep standard text
+// behavior while supplying an explicit Lua-chosen color.
 type coloredHexSegment struct {
 	*widget.TextSegment
 	shade color.Color
 }
+
 func (s *coloredHexSegment) Visual() fyne.CanvasObject {
 	o := s.TextSegment.Visual()
 	s.Update(o)
 	return o
 }
+
 func (s *coloredHexSegment) Update(o fyne.CanvasObject) {
 	s.TextSegment.Update(o)
-	if text, ok := o.(*canvas.Text); ok { text.Color = s.shade; text.Refresh() }
+	if text, ok := o.(*canvas.Text); ok {
+		text.Color = s.shade
+		text.Refresh()
+	}
 }
+
 func coloredHex(s string, shade color.Color, bold bool) widget.RichTextSegment {
-	segment := hexSeg(s, bold, false)
-	return &coloredHexSegment{TextSegment:segment, shade:shade}
+	return &coloredHexSegment{TextSegment: hexSeg(s, bold, false), shade: shade}
 }
-func (h *hexView) markAt(start,end int64) *bitMark {
-	// Last registration wins when annotations overlap.
-	for i:=len(h.marks)-1;i>=0;i-- {
-		m:=&h.marks[i]
-		if m.Start<end && m.End>start { return m }
-	}
-	return nil
-}
-func (h *hexView) annotatedSegments(row int, line string) []widget.RichTextSegment {
-	var out []widget.RichTextSegment
-	off:=row*hexRow
-	for col,r:=range line {
-		j,half:=-1,0
-		for b:=0;b<hexRow;b++ {
-			if col==hexCol(b) || col==hexCol(b)+1 { j=b; half=col-hexCol(b); break }
-		}
-		if col>=hexAsciiCol && col<hexAsciiCol+min(hexRow,len(h.data)-off) { j=col-hexAsciiCol; half=0 }
-		highlight:=j>=0 && off+j==h.cur/2 && (col>=hexAsciiCol || half==h.cur%2)
-		var mark *bitMark
-		if j>=0 && off+j<len(h.data) {
-			start:=(h.base+int64(off+j))*8
-			if col<hexAsciiCol { start+=int64(half*4); mark=h.markAt(start,start+4) } else { mark=h.markAt(start,start+8) }
-		}
-		if mark!=nil { out=append(out,coloredHex(string(r),mark.Color,highlight)) } else { out=append(out,hexSeg(string(r),highlight,h.focused)) }
-	}
-	start:=(h.base+int64(off))*8
-	end:=start+int64(min(hexRow,len(h.data)-off))*8
-	for _,m:=range h.marks {
-		if m.Start<end && m.End>start {
-			out=append(out,coloredHex(fmt.Sprintf("  [%d:%d) %s",m.Start,m.End,m.Label),m.Color,false))
-		}
-	}
-	// Show exact individual bits as well: nibble coloring alone cannot express
-	// fields such as the 11-bit MPEG frame sync or a 1-bit protection flag.
-	out=append(out,hexSeg("  bits: ",false,false))
-	for j:=off;j<min(off+hexRow,len(h.data));j++ {
-		for bit:=0;bit<8;bit++ {
-			s:=fmt.Sprint((h.data[j]>>uint(7-bit))&1)
-			p:=(h.base+int64(j))*8+int64(bit)
-			if m:=h.markAt(p,p+1); m!=nil { out=append(out,coloredHex(s,m.Color,false)) } else { out=append(out,hexSeg(s,false,false)) }
-		}
-		out=append(out,hexSeg(" ",false,false))
-	}
-	return out
-}
-
-// rowSegments renders row i, highlighting the cursor nibble and its text char.
-func (h *hexView) rowSegments(i int) (string, []widget.RichTextSegment) {
-	off := i * hexRow
-	if off >= len(h.data) {
-		return "", []widget.RichTextSegment{hexSeg(" ", false, false)}
-	}
-	b := h.data[off:min(off+hexRow, len(h.data))]
-	var sb strings.Builder
-	for j := 0; j < hexRow; j++ {
-		if j < len(b) {
-			fmt.Fprintf(&sb, "%02X ", b[j])
-		} else {
-			sb.WriteString("   ")
-		}
-		if j == 7 {
-			sb.WriteByte(' ')
-		}
-	}
-	sb.WriteString(" |")
-	for _, c := range b {
-		if c >= 0x20 && c < 0x7f {
-			sb.WriteByte(c)
-		} else {
-			sb.WriteByte('.')
-		}
-	}
-	sb.WriteByte('|')
-	line := sb.String()
-	offStr := fmt.Sprintf("%012X", h.base+int64(off))
-	if len(h.marks)>0 { return offStr,h.annotatedSegments(i,line) }
-	cb := h.cur/2 - off
-	if cb < 0 || cb >= len(b) {
-		return offStr, []widget.RichTextSegment{hexSeg(line, false, false)}
-	}
-	p1 := hexCol(cb) + h.cur%2
-	p2 := hexAsciiCol + cb
-	parts := []struct {
-		s  string
-		hl bool
-	}{{line[:p1], false}, {line[p1 : p1+1], true}, {line[p1+1 : p2], false}, {line[p2 : p2+1], true}, {line[p2+1:], false}}
-	var segs []widget.RichTextSegment
-	for _, p := range parts {
-		if p.s != "" {
-			segs = append(segs, hexSeg(p.s, p.hl, h.focused))
-		}
-	}
-	return offStr, segs
-}
-
-// hexCell is one row of the hex list: offset + bytes + text.
-type hexCell struct {
-	widget.BaseWidget
-	h    *hexView
-	row  int
-	off  *widget.RichText
-	text *widget.RichText
-	box  *fyne.Container
-}
-
-func newHexCell(h *hexView) *hexCell {
-	c := &hexCell{h: h, row: -1}
-	c.off = widget.NewRichText(hexSeg("000000000000", true, false))
-	c.text = widget.NewRichText(hexSeg(strings.Repeat(" ", hexAsciiCol+hexRow+1), false, false))
-	c.box = container.NewHBox(c.off, c.text)
-	c.ExtendBaseWidget(c)
-	return c
-}
-
-func (c *hexCell) CreateRenderer() fyne.WidgetRenderer { return widget.NewSimpleRenderer(c.box) }
-
-func (c *hexCell) setRow(i int) {
-	c.row = i
-	off, segs := c.h.rowSegments(i)
-	start := (c.h.base+int64(i*hexRow))*8
-	if m:=c.h.markAt(start,start+hexRow*8); m!=nil {
-		c.off.Segments=[]widget.RichTextSegment{coloredHex(off,m.Color,true)}
-	} else { c.off.Segments=[]widget.RichTextSegment{hexSeg(off,true,false)} }
-	c.off.Refresh()
-	c.text.Segments = segs
-	c.text.Refresh()
-}
-
-func (c *hexCell) Tapped(ev *fyne.PointEvent) {
-	cw := fyne.MeasureText("0", theme.TextSize(), fyne.TextStyle{Monospace: true}).Width
-	if cw <= 0 || c.row < 0 {
-		return
-	}
-	x := ev.Position.X - c.text.Position().X - theme.InnerPadding()
-	col := 0
-	if x > 0 {
-		col = int(x / cw)
-	}
-	c.h.tapAt(c.row, col)
-}
-
-// A double-click has exactly the same in-place semantics as a single click.
-func (c *hexCell) DoubleTapped(ev *fyne.PointEvent) { c.Tapped(ev) }
-

@@ -30,7 +30,7 @@ type App struct {
 	fa              fyne.App
 	win             fyne.Window
 	cfg             *config.Config
-	tabs            *container.DocTabs
+	tabs            *docTabs
 	editors         map[*container.TabItem]*Editor
 	engine          *script.Engine
 	statusLabel     *widget.Label
@@ -44,17 +44,21 @@ type App struct {
 	shortcuts       map[string]config.Action
 	canvasShortcuts []fyne.Shortcut
 	untitled        int
+	windows         map[string]fyne.Window
+	openWins        map[fyne.Window]bool
+	searchNext      func()
 }
 
 // Run starts the editor, opening any files given as arguments.
 func Run(args []string) {
 	fa := app.NewWithID("com.nitrobutton.uberpad")
 	cfg, cfgErr := config.Load()
-	a := &App{fa: fa, cfg: cfg, editors: map[*container.TabItem]*Editor{}, stopped: make(chan struct{})}
+	a := &App{fa: fa, cfg: cfg, editors: map[*container.TabItem]*Editor{}, stopped: make(chan struct{}),
+		windows: map[string]fyne.Window{}, openWins: map[fyne.Window]bool{}}
 	a.win = fa.NewWindow(config.AppName + " " + config.Version)
 	a.engine = script.New(a)
 
-	a.tabs = container.NewDocTabs()
+	a.tabs = newDocTabs()
 	a.tabs.CloseIntercept = a.requestClose
 	a.tabs.OnSelected = func(*container.TabItem) {
 		a.updateStatus()
@@ -87,7 +91,14 @@ func Run(args []string) {
 		a.NewTab()
 	}
 	a.win.SetCloseIntercept(a.requestQuit)
-	a.win.Resize(fyne.NewSize(1100, 750))
+	a.win.SetMaster()
+	a.win.SetOnDropped(a.dropped)
+	a.win.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
+		if ev.Name == fyne.KeyF3 {
+			a.findNext()
+		}
+	})
+	a.win.Resize(a.savedSize("main", fyne.NewSize(1100, 750)))
 	if cfgErr != nil {
 		dialog.ShowError(cfgErr, a.win)
 	}
@@ -265,6 +276,10 @@ func (a *App) requestQuit() {
 		}
 	}
 	quit := func() {
+		a.rememberSize("main", a.win.Canvas().Size())
+		for w := range a.openWins {
+			w.Close()
+		}
 		close(a.stopped)
 		a.engine.Close()
 		for _, ed := range a.editors {
@@ -492,21 +507,7 @@ func (a *App) GotoPage(k int64) {
 	}
 }
 
-func (a *App) Prompt(title, label, def string, cb func(string, bool)) {
-	e := widget.NewEntry()
-	e.SetText(def)
-	d := dialog.NewForm(title, "OK", "Cancel", []*widget.FormItem{widget.NewFormItem(label, e)},
-		func(ok bool) { cb(e.Text, ok) }, a.win)
-	d.Resize(fyne.NewSize(420, 160))
-	d.Show()
-	a.win.Canvas().Focus(e)
-}
-
-func (a *App) Confirm(title, msg string, cb func(bool)) {
-	dialog.ShowConfirm(title, msg, cb, a.win)
-}
-
-func (a *App) Alert(msg string) { dialog.ShowInformation(config.AppName, msg, a.win) }
+// Prompt, Confirm and Alert are implemented as movable windows in windows.go.
 
 
 // OpenFile opens path in a tab (or selects it if already open).

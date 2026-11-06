@@ -83,3 +83,12 @@ func (e *shortcutEntry) TypedShortcut(s fyne.Shortcut) {
 	}
 	e.Entry.TypedShortcut(s)
 }
+
+// TypedKey makes F3 repeat the last search while editing.
+func (e *shortcutEntry) TypedKey(ev *fyne.KeyEvent) {
+	if ev.Name == fyne.KeyF3 {
+		e.app.findNext()
+		return
+	}
+	e.Entry.TypedKey(ev)
+}

@@ -146,6 +146,7 @@ type Editor struct {
 	annotationBox *fyne.Container
 	annotationText *markedText
 	annotationLegend *widget.RichText
+	legendCache annotationLegendCache
 	annotationToggle *widget.Button
 	annotationsHidden bool
 	src       *pageSource
@@ -423,7 +424,7 @@ func (ed *Editor) render() error {
 			return err
 		}
 		ed.hex.cur = 0
-		ed.hex.marks = ed.marks
+		ed.hex.setMarks(ed.marks)
 		ed.hex.setData(ed.src.base, append([]byte(nil), b...))
 		ed.textView.Hide()
 		ed.info.Hide()

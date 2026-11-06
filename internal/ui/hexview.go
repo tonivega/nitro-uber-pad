@@ -46,6 +46,17 @@ type hexView struct {
 	onShortcut func(fyne.Shortcut) bool
 	bitIdx     []int32
 	idxValid   bool
+	rowCache   map[int]hexRowCache
+}
+
+// Cache only materialized rows. Byte snapshots detect in-place nibble edits;
+// a page or annotation change invalidates every cached row.
+type hexRowCache struct {
+	data      string
+	cursor    int
+	focused   bool
+	selection color.Color
+	runs      []textRun
 }
 
 func newHexView(onChange func(), onCursor func()) *hexView {
@@ -83,6 +94,7 @@ func (h *hexView) CreateRenderer() fyne.WidgetRenderer { return widget.NewSimple
 
 func (h *hexView) setData(base int64, data []byte) {
 	h.base, h.data, h.idxValid = base, data, false
+	h.rowCache = nil
 	if m := len(h.data)*2 - 1; h.cur > m {
 		h.cur = m
 	}
@@ -93,10 +105,22 @@ func (h *hexView) setData(base int64, data []byte) {
 }
 
 func (h *hexView) setMarks(m []bitMark) {
-	if len(m) == 0 && len(h.marks) == 0 {
+	same := len(m) == len(h.marks)
+	if same {
+		for i := range m {
+			if m[i] != h.marks[i] {
+				same = false
+				break
+			}
+		}
+	}
+	if same {
 		return
 	}
-	h.marks, h.idxValid = m, false
+	// Keep an independent definition snapshot: callers may mutate their slice.
+	h.marks = append([]bitMark(nil), m...)
+	h.idxValid = false
+	h.rowCache = nil
 	h.view.Refresh()
 }
 
@@ -250,8 +274,36 @@ func (h *hexView) markIn(s, e int) *bitMark {
 	return &h.marks[best]
 }
 
-// rowRuns renders row i: offset, hex digits, text, labels and bits.
+// rowRuns reuses unchanged rows, including rows unaffected by cursor movement.
 func (h *hexView) rowRuns(i int) []textRun {
+	if i < 0 || i >= (len(h.data)+hexRow-1)/hexRow {
+		return nil
+	}
+	off := i * hexRow
+	end := min(off+hexRow, len(h.data))
+	data := string(h.data[off:end])
+	cursor := -1
+	if h.cur/2 >= off && h.cur/2 < end {
+		cursor = h.cur
+	}
+	var selection color.Color
+	if h.focused {
+		selection = theme.SelectionColor()
+	}
+	if cached, ok := h.rowCache[i]; ok && cached.data == data &&
+		cached.cursor == cursor && cached.focused == h.focused && cached.selection == selection {
+		return cached.runs
+	}
+	runs := h.buildRowRuns(i)
+	if h.rowCache == nil {
+		h.rowCache = make(map[int]hexRowCache)
+	}
+	h.rowCache[i] = hexRowCache{data: data, cursor: cursor, focused: h.focused, selection: selection, runs: runs}
+	return runs
+}
+
+// buildRowRuns renders offset, hex digits, text, labels and bits.
+func (h *hexView) buildRowRuns(i int) []textRun {
 	off := i * hexRow
 	if off >= len(h.data) {
 		return nil

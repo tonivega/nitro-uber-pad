@@ -272,6 +272,7 @@ func (a *App) showSettings() {
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Variables", varsTab),
 		container.NewTabItem("Actions & Shortcuts", actsTab),
+		container.NewTabItem("Scripted UI", a.scriptedUISettings()),
 		container.NewTabItem("General", genTab),
 	)
 	d := dialog.NewCustomConfirm("Settings", "Save", "Cancel", tabs, func(ok bool) {
@@ -292,6 +293,21 @@ func (a *App) showSettings() {
 		for _, r := range rows {
 			if k := strings.TrimSpace(r.key.Text); k != "" {
 				vars[k] = r.val.Text
+			}
+		}
+		// A settings edit must not silently steal a runtime shortcut or ID.
+		for _, runtimeAction := range a.scriptActions {
+			for _, configured := range actions {
+				if configured.ID == runtimeAction.ID {
+					dialog.ShowError(fmt.Errorf("ID %q belongs to a runtime action; remove it in Scripted UI first", configured.ID), a.win)
+					return
+				}
+				left, le := ParseShortcut(configured.Shortcut)
+				right, re := ParseShortcut(runtimeAction.Shortcut)
+				if le == nil && re == nil && left.ShortcutName() == right.ShortcutName() {
+					dialog.ShowError(fmt.Errorf("shortcut %q belongs to runtime action %q", configured.Shortcut, runtimeAction.ID), a.win)
+					return
+				}
 			}
 		}
 		a.cfg.Vars = vars

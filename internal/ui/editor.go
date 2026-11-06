@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -222,11 +223,12 @@ func newEditor(a *App, doc *document.Document, title string) *Editor {
 
 	editArea := container.NewBorder(nil, nil, ed.gutterScroll, nil, ed.entry)
 	ed.textView = container.NewBorder(nil, ed.hbar, nil, nil, editArea)
-	ed.hex = newHexView(ed.markDirty, ed.editHexRow, func() {
+	ed.hex = newHexView(ed.markDirty, func() {
 		if a.current() == ed {
 			a.updateStatus()
 		}
 	})
+	ed.hex.onShortcut = a.handleShortcut
 	ed.hex.content.Hide()
 	ed.info = widget.NewLabel("")
 	ed.info.Wrapping = fyne.TextTruncate
@@ -652,31 +654,6 @@ func (ed *Editor) updateInfo() {
 	ed.info.SetText(inspectText(lineAt(ed.entry.Text, ed.entry.CursorRow), ed.entry.CursorColumn))
 }
 
-// editHexRow edits the bytes of one hex row (the byte count may change).
-func (ed *Editor) editHexRow(row int) {
-	off := row * hexRow
-	if off > len(ed.hex.data) {
-		return
-	}
-	end := min(off+hexRow, len(ed.hex.data))
-	title := fmt.Sprintf("Edit bytes at offset %012X", ed.hex.base+int64(off))
-	ed.app.Prompt(title, "Hex bytes:", hexString(ed.hex.data[off:end]), func(v string, ok bool) {
-		if !ok {
-			return
-		}
-		b, err := parseHexBytes(v)
-		if err != nil {
-			dialog.ShowError(err, ed.app.win)
-			return
-		}
-		data := append([]byte(nil), ed.hex.data[:off]...)
-		data = append(data, b...)
-		data = append(data, ed.hex.data[end:]...)
-		ed.hex.setData(ed.hex.base, data)
-		ed.markDirty()
-	})
-}
-
 // Cursor returns the 0-based cursor position: line/column in text views,
 // 16-byte row / byte column in the hex view.
 func (ed *Editor) Cursor() (int, int) {
@@ -712,11 +689,17 @@ func (ed *Editor) SetCursor(row, col int) {
 func (ed *Editor) watch() {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
+	stamp := ed.diskStamp()
 	for {
 		select {
 		case <-ed.stop:
 			return
 		case <-t.C:
+			next := ed.diskStamp()
+			if next != stamp && ed.doc.ChangedOnDisk() {
+				ed.app.Log("disk", fmt.Sprintf("Changed %q: %s -> %s (poll interval 2s)", ed.doc.Path(), stamp, next))
+			}
+			stamp = next
 			if !ed.diskChanged.Load() && ed.doc.ChangedOnDisk() {
 				ed.showDiskChanged()
 			}
@@ -724,10 +707,25 @@ func (ed *Editor) watch() {
 	}
 }
 
-// close stops the watcher and releases the document.
+func (ed *Editor) diskStamp() string {
+	p := ed.doc.Path()
+	if p == "" {
+		return "unsaved"
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("size=%d modified=%s", st.Size(), st.ModTime().Format(time.RFC3339Nano))
+}
+
+// close stops the watcher and releases the document exactly once.
 func (ed *Editor) close() {
-	ed.stopOnce.Do(func() { close(ed.stop) })
-	ed.doc.Close()
+	ed.stopOnce.Do(func() {
+		close(ed.stop)
+		ed.app.Log("file", fmt.Sprintf("Closed %q (unsaved=%t)", ed.doc.Path(), ed.Modified()))
+		ed.doc.Close()
+	})
 }
 
 // showDiskChanged shows the visual "changed on disk" indication.
@@ -771,8 +769,10 @@ func (ed *Editor) reload() error {
 	}
 	ed.dirty = false
 	if err := ed.doc.Reload(); err != nil {
+		ed.app.Log("file", fmt.Sprintf("Reload failed %q: %v", ed.doc.Path(), err))
 		return err
 	}
+	ed.app.Log("file", fmt.Sprintf("Reloaded %q (%d bytes; pending edits discarded)", ed.doc.Path(), ed.doc.Size()))
 	ed.diskChanged.Store(false)
 	ed.banner.Hide()
 	ed.loadPage(ed.page)
@@ -929,8 +929,10 @@ func (ed *Editor) saveTo(target string) error {
 	oldSize := ed.doc.Size()
 	changes, err := ed.doc.Save(target)
 	if err != nil {
+		ed.app.Log("file", fmt.Sprintf("Save failed %q: %v", target, err))
 		return err
 	}
+	ed.app.Log("file", fmt.Sprintf("Saved %q: %d -> %d bytes, %d page replacement(s)", target, oldSize, ed.doc.Size(), len(changes)))
 	ed.title = filepath.Base(target)
 	ed.writeLog(target, oldSize, changes)
 	ed.app.cfg.AddRecent(target)

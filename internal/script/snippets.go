@@ -123,4 +123,42 @@ if editor.disk_changed() then
 end
 -- save without the "changed on disk" confirmation
 local ok, err = editor.save(true)
+
+-- 11. Address documents by path; open and save without file pickers --------
+local path = nup.join(nup.home(), "notes.txt")
+local ok, err = ui.select_tab(path)
+if not ok then ok, err = editor.open(path) end
+if not ok then ui.alert(err) return end
+for _, tab in ipairs(ui.tabs()) do
+  print(tab.index, tab.path or "(unsaved)", tab.modified)
+end
+editor.insert("\nUpdated " .. nup.date("15:04:05"))
+local saved, why = editor.save()
+if not saved then ui.notify(tostring(why)) end
+-- A new document can instead be written directly with editor.save_as(path).
+
+-- 12. Materialize a menu item, toolbar button AND shortcut at runtime ------
+local ok, err = ui.action{
+  id = "runtime_stamp", label = "Stamp page", menu = "My toolbox",
+  toolbar = true, shortcut = "Mod+Alt+T",
+  script = 'editor.insert(nup.date("2006-01-02 15:04:05"))',
+}
+if not ok then ui.alert(err) end
+-- Call ui.action again with this ID to replace it, or:
+-- ui.remove_action("runtime_stamp")
+-- Inspect these controls in Settings > Scripted UI; configured actions remain.
+
+-- 13. One-shot, wall-clock and repeating callbacks ------------------------
+timer.after(2, function() ui.notify("Two seconds later") end)
+-- timer.at("2030-01-01T09:00:00Z", function() ui.notify("Scheduled reminder") end)
+local ticks = 0
+local repeating
+repeating = timer.every(10, function()
+  ticks = ticks + 1
+  ui.notify("Tick " .. ticks)
+  if ticks == 3 then timer.cancel(repeating) end
+end)
+-- Repeats use fixed delay after completion; busy scripts/HTTP postpone timers.
+-- Capture a path and select it in a timer before editing: active tabs can change!
+-- View > Activity Logs records execution, callback errors and network/file events.
 `

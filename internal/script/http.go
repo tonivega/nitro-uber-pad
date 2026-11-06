@@ -1,8 +1,10 @@
 package script
 
 import (
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"time"
@@ -36,14 +38,29 @@ func httpFail(L *lua.LState, msg string) int {
 
 // doHTTP performs a request and pushes body, status, err, headers.
 func (e *Engine) doHTTP(L *lua.LState, method, rawURL string, body *string, contentType string, headers *lua.LTable, timeout time.Duration) int {
+	start := time.Now()
+	destination := "(invalid URL)"
+	if u, err := url.Parse(rawURL); err == nil {
+		u.User, u.RawQuery, u.Fragment = nil, "", ""
+		destination = u.String()
+	}
+	e.log("network", fmt.Sprintf("HTTP start %s %s; timeout=%s", method, destination, timeout))
+	defer func() { e.log("network", fmt.Sprintf("HTTP finished %s %s in %s", method, destination, time.Since(start))) }()
 	var rd io.Reader
 	if body != nil {
 		rd = strings.NewReader(*body)
 	}
 	req, err := http.NewRequest(method, rawURL, rd)
 	if err != nil {
+		e.log("network", "Invalid HTTP request")
 		return httpFail(L, err.Error())
 	}
+	if ctx := L.Context(); ctx != nil { req = req.WithContext(ctx) }
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		ConnectStart: func(network, addr string) { e.log("network", fmt.Sprintf("Connect %s %s", network, addr)) },
+		ConnectDone: func(network, addr string, err error) { e.log("network", fmt.Sprintf("Connected %s %s; error=%v", network, addr, err)) },
+		GotConn: func(info httptrace.GotConnInfo) { e.log("network", fmt.Sprintf("Connection acquired; reused=%t idle=%t", info.Reused, info.WasIdle)) },
+	}))
 	req.Header.Set("User-Agent", "NitroUberPad/"+config.Version)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
@@ -53,10 +70,18 @@ func (e *Engine) doHTTP(L *lua.LState, method, rawURL string, body *string, cont
 	}
 	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
+		logged := err
+		if ue, ok := err.(*url.Error); ok { logged = ue.Err }
+		e.log("network", fmt.Sprintf("HTTP failed: %v", logged))
 		return httpFail(L, err.Error())
 	}
 	defer resp.Body.Close()
-	data, rerr := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBody))
+	data, rerr := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBody+1))
+	if len(data) > maxHTTPBody {
+		data = data[:maxHTTPBody]
+		rerr = fmt.Errorf("response exceeds %d-byte limit", maxHTTPBody)
+	}
+	e.log("network", fmt.Sprintf("HTTP response %s %s: status=%d bytes=%d read_error=%v", method, destination, resp.StatusCode, len(data), rerr))
 	hdr := L.NewTable()
 	for k, v := range resp.Header {
 		hdr.RawSetString(strings.ToLower(k), lua.LString(strings.Join(v, ", ")))

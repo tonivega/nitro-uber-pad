@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -33,7 +34,12 @@ type App struct {
 	editors         map[*container.TabItem]*Editor
 	engine          *script.Engine
 	statusLabel     *widget.Label
-	noticeLabel     *widget.Label
+	noticeLabel     *widget.Button
+	events          eventStore
+	notices         eventStore
+	noticeGeneration atomic.Uint64
+	stopped         chan struct{}
+	scriptActions   []config.Action
 	toolbar         *fyne.Container
 	shortcuts       map[string]config.Action
 	canvasShortcuts []fyne.Shortcut
@@ -44,7 +50,7 @@ type App struct {
 func Run(args []string) {
 	fa := app.NewWithID("com.nitrobutton.uberpad")
 	cfg, cfgErr := config.Load()
-	a := &App{fa: fa, cfg: cfg, editors: map[*container.TabItem]*Editor{}}
+	a := &App{fa: fa, cfg: cfg, editors: map[*container.TabItem]*Editor{}, stopped: make(chan struct{})}
 	a.win = fa.NewWindow(config.AppName + " " + config.Version)
 	a.engine = script.New(a)
 
@@ -53,13 +59,17 @@ func Run(args []string) {
 	a.tabs.OnSelected = func(*container.TabItem) {
 		a.updateStatus()
 		if ed := a.current(); ed != nil {
-			a.win.Canvas().Focus(ed.entry)
+			if ed.mode == modeHex {
+				a.win.Canvas().Focus(ed.hex)
+			} else {
+				a.win.Canvas().Focus(ed.entry)
+			}
 		}
 	}
 
 	a.statusLabel = widget.NewLabel("")
 	a.statusLabel.Wrapping = fyne.TextTruncate
-	a.noticeLabel = widget.NewLabel("")
+	a.noticeLabel = widget.NewButton("Notifications", a.showNotifications)
 	historyBtn := widget.NewButtonWithIcon("History", theme.HistoryIcon(), a.showHistory)
 	recentBtn := widget.NewButtonWithIcon("Recent", theme.FolderOpenIcon(), a.showRecent)
 	status := container.NewBorder(nil, nil, nil, container.NewHBox(a.noticeLabel, recentBtn, historyBtn), a.statusLabel)
@@ -118,7 +128,8 @@ func (a *App) rebuildActions() {
 		menus[menu] = append(menus[menu], it)
 	}
 	var bad []string
-	for _, act := range a.cfg.Actions {
+	actions := append(append([]config.Action(nil), a.cfg.Actions...), a.scriptActions...)
+	for _, act := range actions {
 		act := act
 		run := func() { a.runAction(act) }
 		item := fyne.NewMenuItem(act.Label, run)
@@ -151,6 +162,22 @@ func (a *App) rebuildActions() {
 		}
 	}))
 	add("View", fyne.NewMenuItem("Change History", a.showHistory))
+	add("View", fyne.NewMenuItem("Notification History", a.showNotifications))
+	add("View", fyne.NewMenuItem("Activity Logs", a.showLogs))
+	add("View", fyne.NewMenuItem("Task Runner", a.showTaskRunner))
+	add("Tools", fyne.NewMenuItem("Run Selection / Document as Lua", a.runDocumentLua))
+	add("Tools", fyne.NewMenuItem("Load Kitchen Sink Script", a.loadKitchenSink))
+	// Built-in entry points are present even with an older/custom configuration.
+	runLua := config.Action{ID: "__run_document_lua", Label: "Run Lua", Script: "ui.run_document()"}
+	if sc, err := ParseShortcut("Mod+Enter"); err == nil {
+		if _, used := a.shortcuts[sc.ShortcutName()]; !used {
+			a.shortcuts[sc.ShortcutName()] = runLua
+			c.AddShortcut(sc, func(fyne.Shortcut) { a.runDocumentLua() })
+			a.canvasShortcuts = append(a.canvasShortcuts, sc)
+		}
+	}
+	a.toolbar.Add(widget.NewButton("Run Lua", a.runDocumentLua))
+	a.toolbar.Add(widget.NewButton("Tasks", a.showTaskRunner))
 	add("Edit", fyne.NewMenuItem("Decode Unicode Escapes", func() {
 		if ed := a.current(); ed != nil {
 			ed.DecodeEscapes()
@@ -183,6 +210,7 @@ func (a *App) handleShortcut(s fyne.Shortcut) bool {
 }
 
 func (a *App) runAction(act config.Action) {
+	if act.ID == "__run_document_lua" { a.runDocumentLua(); return }
 	name := act.ID
 	if name == "" {
 		name = act.Label
@@ -233,6 +261,8 @@ func (a *App) requestQuit() {
 		}
 	}
 	quit := func() {
+		close(a.stopped)
+		a.engine.Close()
 		for _, ed := range a.editors {
 			ed.close()
 		}
@@ -474,24 +504,25 @@ func (a *App) Confirm(title, msg string, cb func(bool)) {
 
 func (a *App) Alert(msg string) { dialog.ShowInformation(config.AppName, msg, a.win) }
 
-func (a *App) Notify(msg string) { a.noticeLabel.SetText(msg) }
 
 // OpenFile opens path in a tab (or selects it if already open).
 func (a *App) OpenFile(path string) error {
-	abs, err := filepath.Abs(path)
+	abs, err := filepath.Abs(config.ExpandHome(path))
 	if err != nil {
 		return err
 	}
 	for it, ed := range a.editors {
-		if ed.doc.Path() == abs {
+		if sameDocumentPath(ed.doc.Path(), abs) {
 			a.tabs.Select(it)
 			return nil
 		}
 	}
 	doc, err := document.Open(abs, a.pageSize())
 	if err != nil {
+		a.Log("file", fmt.Sprintf("Open failed %q: %v", abs, err))
 		return err
 	}
+	a.Log("file", fmt.Sprintf("Opened %q (%d bytes, page size %d)", abs, doc.Size(), a.pageSize()))
 	if cur := a.current(); cur != nil && cur.doc.IsNew() && !cur.Modified() {
 		a.closeEditor(cur.item)
 	}

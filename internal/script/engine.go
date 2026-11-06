@@ -2,6 +2,8 @@
 package script
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -51,6 +53,43 @@ type Host interface {
 // APIHelp documents the scripting API.
 const APIHelp = `Nitro UberPad scripting (Lua 5.1)
 
+EXECUTION AND FILE VARIABLES
+Tools > Run Selection / Document as Lua; toolbar Run Lua; Mod+Enter.
+Selection wins; otherwise the complete edited document is executed (16 MiB limit).
+Source is snapshotted before execution. Only run trusted code.
+View > Task Runner shows scripts, processes, timers and pending Lua dialog callbacks.
+Refresh for updates; cancel selected/all, inspect output/errors, clear finished.
+
+task.run(code [, name [, timeout]]) -> task ID; queued background Lua source
+  Lua shares one serialized interpreter, not parallel Lua states. No timeout by
+  default; timeout seconds include queue time. 0/nil means unlimited.
+task.list() -> {id, kind, name, state, error, output, exit_code, created}[]
+task.cancel(task_id) -> boolean; independent of timer IDs
+task.sleep(seconds) -> true | nil, err; cancellable, blocks other Lua executions
+process.run{program=, args={...}, env={KEY="value"}, cwd=, stdin=,
+            timeout=, background=false}
+  Foreground -> result table (state, exit_code, output, error, id).
+  Background -> task ID. Invalid options -> nil, err.
+  args are literal strings, not a shell command. env overrides inherited values.
+  timeout is seconds; omitted/nil/0 means none. Timeout and cancellation kill
+  the direct child, NOT its entire descendant tree. Avoid shell-detached jobs:
+  descendants started by external programs cannot be tracked by this runner.
+  stdout+stderr are combined, drained, and capped at 1 MiB. Exit code -1 means
+  start failure or termination without an exit code. Inspect state/error too.
+  os.execute(command) is tracked but invokes a platform shell; prefer process.run.
+fs.read(path) -> binary-safe string | nil, err
+fs.write(path, value) -> true | nil, err; overwrites directly, no GUI/tab changes
+  Paths expand ~. Reads materialize the whole file; writes do not create parents.
+  Use nup.mkdir first. Do not overwrite an open modified document inadvertently.
+Tools > Load Kitchen Sink Script loads an embedded, editable integration demo.
+
+Cancellation is cooperative in Go host functions: Lua loops, HTTP, sleep and
+processes are cancellable; disk operations finish before returning. Dialog
+cancellation disables the Lua callback but does not dismiss the visible dialog.
+Task history keeps the latest 200 completed records plus all live work. Tasks
+are session-only and canceled on quit. Internal editor indexing/watchers are
+owned by documents, stop on close, and are not user-executable script tasks.
+
 editor.text()                 -> text of the current page
 editor.set_text(s)            replace the current page text
 editor.insert(s)              insert s at the cursor
@@ -79,6 +118,31 @@ ui.prompt(title, label, fn [, default])  fn(value) / fn(nil) on cancel
 ui.confirm(title, msg, fn)    fn(true|false)
 ui.open(path)                 -> true | nil, err
 ui.open_dialog()  ui.new_tab()  ui.close_tab()
+ui.tabs()                     -> ordered {index, path, title, modified, selected}[]
+                              path is nil for unsaved tabs; index is 1-based
+ui.select_tab(path_or_index)  -> true | nil, err; does not open missing tabs
+editor.open(path)             alias for ui.open(path); no file picker
+editor.path([tab_index])      optional index reads another tab's path
+editor.save_as(path)          writes directly without a file picker (overwrites target)
+
+ui.action{ id=, label=, menu=, shortcut=, toolbar=, script= }
+                              -> true | nil, err; creates/replaces a runtime action
+                              script is Lua source, not a function; IDs must not
+                              collide with configured actions. Shortcuts must be unique.
+ui.remove_action(id)          -> true | nil, err; runtime actions only
+ui.actions()                 -> runtime action tables (Settings > Scripted UI)
+                              Configured actions are retained. Runtime actions last
+                              this session; register them again in your setup script.
+
+timer.after(seconds, fn_or_code) -> timer ID (one-shot)
+timer.every(seconds, fn_or_code) -> timer ID (repeats after each callback finishes)
+timer.at(unix_seconds_or_RFC3339, fn_or_code) -> one-shot ID; past times run next
+                              e.g. timer.at("2030-01-01T09:00:00Z", function() ... end)
+timer.cancel(id)              -> boolean (also safe inside its callback)
+                              Durations must be finite and > 0. Timers are session-only,
+                              serialized with scripts, non-overlapping, canceled on quit.
+                              Busy scripts/HTTP delay callbacks; not a real-time scheduler.
+                              A repeating timer stops on callback error (see Activity Logs).
 
 config.get(key)               -> value of a settings variable or nil
 config.set(key, value)        set and persist a variable
@@ -118,31 +182,56 @@ type Engine struct {
 	mu sync.Mutex
 	L  *lua.LState
 	h  Host
+	timers map[int]*scheduledTimer
+	nextTimer int
+	closed bool
+	taskMu sync.Mutex
+	tasks map[int]*executionTask
+	nextTask int
+	shuttingDown bool
 }
 
 // New creates an engine bound to host.
 func New(h Host) *Engine {
-	e := &Engine{L: lua.NewState(), h: h}
+	e := &Engine{L: lua.NewState(), h: h, timers: make(map[int]*scheduledTimer)}
 	e.register()
 	return e
 }
 
 // Run executes a script.
-func (e *Engine) Run(name, src string) error {
+func (e *Engine) Run(name, src string) (err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.closed { return fmt.Errorf("script engine is closed") }
+	id, ctx := e.newTask("script", name)
+	defer func() { e.finishTask(id, err) }()
+	e.L.SetContext(ctx)
+	defer e.L.RemoveContext()
+	e.setTaskState(id, "running")
+	start := time.Now()
+	e.log("script", fmt.Sprintf("Start %q (%d source bytes)", name, len(src)))
+	defer func() {
+		e.log("script", fmt.Sprintf("Finish %q in %s; error=%v", name, time.Since(start), err))
+	}()
 	fn, err := e.L.Load(strings.NewReader(src), name)
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
 	e.L.Push(fn)
 	return e.L.PCall(0, 0, nil)
 }
 
-func (e *Engine) callback(fn *lua.LFunction, args ...lua.LValue) {
+func (e *Engine) callback(id int, ctx context.Context, fn *lua.LFunction, args ...lua.LValue) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err := e.L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true}, args...); err != nil {
+	if e.closed || ctx.Err() != nil { return }
+	e.setTaskState(id, "running")
+	e.L.SetContext(ctx)
+	defer e.L.RemoveContext()
+	start := time.Now()
+	e.log("script", "Start dialog callback")
+	err := e.L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true}, args...)
+	e.finishTask(id, err)
+	e.log("script", fmt.Sprintf("Finish dialog callback in %s; error=%v", time.Since(start), err))
+	if err != nil {
 		e.h.Alert("Script error: " + err.Error())
 	}
 }
@@ -174,8 +263,17 @@ func (e *Engine) register() {
 		"insert":   func(L *lua.LState) int { h.Insert(L.CheckString(1)); return 0 },
 		"path": func(L *lua.LState) int {
 			p := h.Path()
+			if L.GetTop() > 0 && L.Get(1) != lua.LNil {
+				tabs, ok := h.(tabHost)
+				if !ok { return ret(L, fmt.Errorf("tab API unavailable")) }
+				i := L.CheckInt(1)
+				all := tabs.TabInfo()
+				if i < 1 || i > len(all) { return ret(L, fmt.Errorf("tab index out of range")) }
+				p = all[i-1].Path
+			}
 			return pushStrOrNil(L, p, p != "")
 		},
+		"open": func(L *lua.LState) int { return ret(L, h.OpenFile(config.ExpandHome(L.CheckString(1)))) },
 		"title":          func(L *lua.LState) int { L.Push(lua.LString(h.Title())); return 1 },
 		"is_new":         func(L *lua.LState) int { L.Push(lua.LBool(h.IsNew())); return 1 },
 		"is_modified":    func(L *lua.LState) int { L.Push(lua.LBool(h.Modified())); return 1 },
@@ -206,18 +304,22 @@ func (e *Engine) register() {
 		"notify": func(L *lua.LState) int { h.Notify(L.CheckString(1)); return 0 },
 		"prompt": func(L *lua.LState) int {
 			title, label, fn := L.CheckString(1), L.OptString(2, ""), L.CheckFunction(3)
+			id, ctx := e.newTask("dialog", title)
+			e.setTaskState(id, "waiting")
 			h.Prompt(title, label, L.OptString(4, ""), func(v string, ok bool) {
 				if ok {
-					e.callback(fn, lua.LString(v))
+					e.callback(id, ctx, fn, lua.LString(v))
 				} else {
-					e.callback(fn, lua.LNil)
+					e.callback(id, ctx, fn, lua.LNil)
 				}
 			})
 			return 0
 		},
 		"confirm": func(L *lua.LState) int {
 			title, msg, fn := L.CheckString(1), L.CheckString(2), L.CheckFunction(3)
-			h.Confirm(title, msg, func(ok bool) { e.callback(fn, lua.LBool(ok)) })
+			id, ctx := e.newTask("dialog", title)
+			e.setTaskState(id, "waiting")
+			h.Confirm(title, msg, func(ok bool) { e.callback(id, ctx, fn, lua.LBool(ok)) })
 			return 0
 		},
 		"open":        func(L *lua.LState) int { return ret(L, h.OpenFile(config.ExpandHome(L.CheckString(1)))) },
@@ -273,7 +375,10 @@ func (e *Engine) register() {
 		"dirname":  func(L *lua.LState) int { L.Push(lua.LString(filepath.Dir(L.CheckString(1)))); return 1 },
 		"ulen":     func(L *lua.LState) int { L.Push(lua.LNumber(utf8.RuneCountInString(L.CheckString(1)))); return 1 },
 		"eval": func(L *lua.LState) int {
-			fn, err := L.Load(strings.NewReader(L.CheckString(1)), L.OptString(2, "eval"))
+			name, start := L.OptString(2, "eval"), time.Now()
+			e.log("script", fmt.Sprintf("Start eval %q (%d source bytes)", name, len(L.CheckString(1))))
+			defer func() { e.log("script", fmt.Sprintf("Finish eval %q in %s", name, time.Since(start))) }()
+			fn, err := L.Load(strings.NewReader(L.CheckString(1)), name)
 			if err != nil {
 				L.Push(lua.LFalse)
 				L.Push(lua.LString(err.Error()))
@@ -299,6 +404,9 @@ func (e *Engine) register() {
 	L.SetField(nup, "os", lua.LString(runtime.GOOS))
 	L.SetGlobal("nup", nup)
 	e.registerHTTP()
+	e.registerWorkspace()
+	e.registerTimers()
+	e.registerExecution()
 
 	L.SetGlobal("print", L.NewFunction(func(L *lua.LState) int {
 		var parts []string

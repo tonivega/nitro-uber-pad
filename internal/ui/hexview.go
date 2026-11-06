@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -35,12 +34,12 @@ type hexView struct {
 	list      *widget.List
 	content   fyne.CanvasObject
 	onChange  func()
-	onEditRow func(row int)
 	onCursor  func()
+	onShortcut func(fyne.Shortcut) bool
 }
 
-func newHexView(onChange func(), onEditRow func(row int), onCursor func()) *hexView {
-	h := &hexView{onChange: onChange, onEditRow: onEditRow, onCursor: onCursor}
+func newHexView(onChange func(), onCursor func()) *hexView {
+	h := &hexView{onChange: onChange, onCursor: onCursor}
 	h.list = widget.NewList(
 		func() int { return (len(h.data) + hexRow - 1) / hexRow },
 		func() fyne.CanvasObject { return newHexCell(h) },
@@ -60,7 +59,7 @@ func newHexView(onChange func(), onEditRow func(row int), onCursor func()) *hexV
 		widget.NewLabelWithStyle("      OFFSET", fyne.TextAlignTrailing, bold),
 		widget.NewLabelWithStyle(hdr.String(), fyne.TextAlignLeading, bold))
 	help := widget.NewLabel("Non-text page (hex view): type 0-9 / A-F to overwrite the nibble at the cursor in place; " +
-		"arrows, Home/End, PgUp/PgDn move; click to place the cursor; double-click a row to replace its bytes.")
+		"click either digit to edit it directly; arrows, Home/End, PgUp/PgDn move. No dialog, no insertion.")
 	help.Wrapping = fyne.TextTruncate
 	h.content = container.NewBorder(container.NewVBox(help, header), nil, nil, nil, h)
 	return h
@@ -120,6 +119,12 @@ func (h *hexView) tapAt(row, col int) {
 		h.setCursor(idx*2 + nib)
 	}
 	h.focus()
+}
+
+func (h *hexView) TypedShortcut(s fyne.Shortcut) {
+	if h.onShortcut != nil {
+		h.onShortcut(s)
+	}
 }
 
 func (h *hexView) FocusGained() { h.focused = true; h.list.Refresh() }
@@ -278,18 +283,6 @@ func (c *hexCell) Tapped(ev *fyne.PointEvent) {
 	c.h.tapAt(c.row, col)
 }
 
-func (c *hexCell) DoubleTapped(*fyne.PointEvent) {
-	if c.row >= 0 && c.h.onEditRow != nil {
-		c.h.onEditRow(c.row)
-	}
-}
+// A double-click has exactly the same in-place semantics as a single click.
+func (c *hexCell) DoubleTapped(ev *fyne.PointEvent) { c.Tapped(ev) }
 
-func hexString(b []byte) string { return fmt.Sprintf("% X", b) }
-
-func parseHexBytes(s string) ([]byte, error) {
-	b, err := hex.DecodeString(strings.Join(strings.Fields(s), ""))
-	if err != nil {
-		return nil, fmt.Errorf("invalid hex bytes: %w", err)
-	}
-	return b, nil
-}
